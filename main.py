@@ -1,7 +1,7 @@
+from dataclasses import dataclass, field
 from itertools import product
-from more_itertools import collapse
-
-from typing import Tuple, Iterable, Set, Union, List
+from functools import partialmethod
+from typing import Tuple, Iterable, Set, Union, List, Optional, Callable
 
 
 def unravel(idx: int, shape: Tuple[int, ...]) -> Tuple[int, int]:
@@ -14,13 +14,59 @@ def flatten(idx: Tuple[int, int], shape: Tuple[int, ...]) -> int:
     return idx[0] * cols + idx[1]
 
 
-class Board(List[bool]):
+@dataclass
+class Cell:
+    __alive: bool = field(default=False)
 
-    def __init__(self, shape: Tuple[int, int], iterable: Iterable):
+    def __repr__(self):
+        return f'{type(self).__name__}(alive={self.alive})'
+
+    @property
+    def alive(self):
+        return self.__alive
+
+    @property
+    def dead(self):
+        return not self.alive
+
+    def set_state(self, state: bool):
+        self.__alive = state
+
+    set_alive = partialmethod(set_state, True)  # type: Callable[..., None]
+
+    set_dead = partialmethod(set_state, False)  # type: Callable[..., None]
+
+
+class Board(List[Cell]):
+
+    def __init__(self, shape: Tuple[int, int], *, initial: Optional[List[Cell]] = None):
         self.__shape = shape
-        list_ = list(collapse(iterable))
-        assert len(list_) == self.rows * self.cols
-        super(Board, self).__init__(list_)
+        if initial is None:
+            initial = [Cell() for _ in range(self.rows * self.cols)]
+        assert len(initial) == self.rows * self.cols
+        super(Board, self).__init__(initial)
+
+    def __repr__(self):
+        return f'{type(self).__name__}(shape={self.shape}, initial={super(Board, self).__repr__()})'
+
+    __str__ = __repr__
+
+    @classmethod
+    def from_list(cls, shape: Tuple[int, int], list_: Union[List[int], List[bool]]) -> 'Board':
+        return cls(shape, initial=[Cell(bool(state)) for state in list_])
+
+    @classmethod
+    def from_indices(cls, shape: Tuple[int, int], list_: Iterable[int]) -> 'Board':
+        return cls(shape, initial=[Cell(idx in list_) for idx in range(shape[0] * shape[1])])
+
+    @classmethod
+    def from_2d_list(cls, list_: Union[List[List[int]], List[List[bool]]]) -> 'Board':
+        shape = len(list_), len(list_[0])
+        return cls(shape, initial=[Cell(bool(state)) for row in list_ for state in row])
+
+    @classmethod
+    def from_2d_indices(cls, shape: Tuple[int, int], list_: Iterable[Tuple[int, int]]) -> 'Board':
+        return cls(shape, initial=[Cell(unravel(idx, shape) in list_) for idx in range(shape[0] * shape[1])])
 
     @property
     def rows(self) -> int:
@@ -34,10 +80,10 @@ class Board(List[bool]):
     def shape(self) -> Tuple[int, int]:
         return self.__shape
 
-    def __getitem__(self, idx: Union[int, Tuple[int, int]]) -> bool:
+    def __getitem__(self, idx: Union[int, Tuple[int, int]]) -> Cell:
         return super(Board, self).__getitem__(self.__validate_idx(idx))
 
-    def __setitem__(self, idx: Union[int, Tuple[int, int]], value):
+    def __setitem__(self, idx: Union[int, Tuple[int, int]], value: Cell):
         super(Board, self).__setitem__(self.__validate_idx(idx), value)
 
     def __validate_idx(self, idx: Union[int, Tuple[int, int]]) -> int:
@@ -65,8 +111,11 @@ class Life:
     __board: Board
     __alive_cells: Set[int]
 
+    generation: int
+
     def __init__(self, board: Board):
         self.board = board
+        self.generation = 0
 
     @property
     def board(self) -> Board:
@@ -75,7 +124,7 @@ class Life:
     @board.setter
     def board(self, new_board: Board):
         self.__board = new_board
-        self.__alive_cells = set(i for i, val in enumerate(self.board) if val)
+        self.__alive_cells = set(i for i, cell in enumerate(self.board) if cell.alive)
 
     @property
     def dead(self):
@@ -85,17 +134,8 @@ class Life:
     def alive(self):
         return bool(self.__alive_cells)
 
-    def __str__(self):
-        s = '-' * (self.board.cols + 2) + '\n'
-        for idx, val in enumerate(self.board):
-            row, col = unravel(idx, self.board.shape)
-            if col == 0:
-                s += '|'
-            s += '#' if val else ' '
-            if col + 1 == self.board.cols:
-                s += '|\n'
-        s += '-' * (self.board.cols + 2) + '\n'
-        return s
+    def __repr__(self):
+        return f'{type(self).__name__}(generation={self.generation}, board={repr(self.board)})'
 
     def update(self):
         to_set_alive = list()
@@ -110,26 +150,28 @@ class Life:
                 continue
 
         for idx in to_set_alive:
-            self.board[idx] = True
+            self.board[idx].set_alive()
             self.__alive_cells.add(idx)
 
         for idx in to_set_dead:
-            self.board[idx] = False
+            self.board[idx].set_dead()
             self.__alive_cells.discard(idx)
+
+        self.generation += 1
 
     @property
     def __cells_to_check(self) -> Set[int]:
         return self.__alive_cells.union(*[self.__get_neighbours_idx(idx) for idx in self.__alive_cells])
 
     def __should_die(self, idx: int) -> bool:
-        if not self.board[idx]:
+        if self.board[idx].dead:
             return False
 
         n_alive_neighbours = len(self.__get_alive_neighbours(idx))
         return n_alive_neighbours > 3 or n_alive_neighbours < 2
 
     def __should_resurrect(self, idx: int) -> bool:
-        if self.board[idx]:
+        if self.board[idx].alive:
             return False
 
         n_alive_neighbours = len(self.__get_alive_neighbours(idx))
@@ -148,18 +190,31 @@ class Life:
         return self.__alive_cells.intersection(self.__get_neighbours_idx(idx))
 
 
-def test():
-    from random import randint
+class LifePrinter:
 
-    # seed(666)
-    rows, cols = 10, 100
-    seed = [bool(randint(0, 1)) for _ in range(rows * cols)]
-    life = Life(Board((rows, cols), seed))
+    @staticmethod
+    def print(life: Life):
+        board = life.board
+        s = f'Generation №{life.generation}\n'
+        s += '_' * (board.cols + 2) + '\n'
+        for idx, cell in enumerate(board):
+            row, col = unravel(idx, board.shape)
+            s += '|' if col % board.cols == 0 else ''
+            s += '#' if cell.alive else ' '
+            s += '|\n' if col % board.cols == board.cols - 1 else ''
+        s += '_' * (board.cols + 2)
+        print(s)
+
+
+def test():
+    rows, cols = 30, 100
+    seed = [1 if (_ % cols in (0, cols - 1)) or (_ // cols) in (0, rows - 1) else 0 for _ in range(rows * cols)]
+    life = Life(Board.from_list((rows, cols), seed))
 
     print(life)
     while not life.dead:
         life.update()
-        print(life)
+        LifePrinter.print(life)
 
 
 if __name__ == '__main__':
